@@ -5,6 +5,6 @@ source:
 - https://github.com/grafana/grafana
 - https://github.com/prometheus/prometheus
 
-congig:
+config:
 - https://github.com/stefanprodan/dockprom
 - https://github.com/abmruman/traefik-docker-compose
