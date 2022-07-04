@@ -1,0 +1,247 @@
+version: "3.5"
+
+networks:
+  net:
+    external: true
+    name: ${NETWORK}
+  local:
+    external: false
+
+volumes:
+  portainer_data: {}
+  prometheus_data: {}
+  grafana_data: {}
+
+services:
+  traefik:
+    # Setting container_name disables running multinple instances of this service
+    container_name: traefik
+    image: traefik:v2.8.0
+    restart: unless-stopped
+    command:
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      - --api
+
+      # providers 
+      - --providers.docker
+      - --providers.docker.network=${NETWORK}
+      - --providers.docker.exposedbydefault=false
+      - --providers.file.filename=/etc/traefik/certs.toml
+
+      # metrics
+      - --metrics.prometheus
+      - --metrics.prometheus.buckets=0.1,0.3,1.2,5.0
+      - --metrics.prometheus.entryPoint=metrics
+      - --metrics.prometheus.addServicesLabels=true
+      - --metrics.prometheus.addrouterslabels=true
+      - --metrics.prometheus.addEntryPointsLabels=true
+      - --metrics.prometheus.manualrouting=true
+      - --entryPoints.metrics.address=:8081
+
+      # Writing Logs to a file
+      - --log.level=${LOG_LEVEL:-debug}
+      - --log.filePath=${LOG_FILE:-/logs/traefik.log}
+      - --log.format=${LOG_FORMA:-json}
+
+      # Configuring a buffer of 100 lines
+      - --accesslog=${ACCESSLOG:-true}
+      - --accesslog.format=${ACCESSLOG_FORMAT:-json}
+      - --accesslog.filepath=${ACCESSLOG_FILE:-/logs/access.log}
+      - --accesslog.bufferingsize=${ACCESSLOG_BUFFERINGSIZE:-100}
+
+      # Limiting the Logs to Specific Fields
+      - --accesslog.fields.defaultmode=${ACCESSLOG_FIELDS_DEFAULTMODE:-keep}
+      - --accesslog.fields.names.ClientUsername=${ACCESSLOG_FIELDS_NAMES_CLIENTUSERNAME:-keep}
+      - --accesslog.fields.headers.defaultmode=${ACCESSLOG_FIELDS_HEADERS_DEFAULTMODE:-keep}
+      - --accesslog.fields.headers.names.User-Agent=${ACCESSLOG_FIELDS_HEADERS_NAMES_USER_AGENT:-keep}
+      - --accesslog.fields.headers.names.Authorization=${ACCESSLOG_FIELDS_HEADERS_NAMES_AUTHORIZATION:-keep}
+      - --accesslog.fields.headers.names.Content-Type=${ACCESSLOG_FIELDS_HEADERS_NAMES_CONTENT_TYPE:-keep}
+
+      # cert resolvers
+      - --certificatesresolvers.le.acme.caserver=${CA_SERVER}
+      - --certificatesresolvers.le.acme.email=${EMAIL}
+      - --certificatesresolvers.le.acme.storage=/acme.json
+      - --certificatesResolvers.le.acme.tlsChallenge=${TLS_CHALLENGE}
+      - --certificatesResolvers.le.acme.dnsChallenge.resolvers=1.1.1.1:53,8.8.8.8:53
+    ports:
+      - "80:80"
+      - "443:443"
+    networks:
+      - net
+      - local
+    volumes:
+      - "${CERT_PATH}:/etc/traefik/certs"
+      - "${ACME_PATH}:/acme.json"
+      - "${CONFIG_PATH}:/etc/traefik"
+      - "${LOG_PATH}:/logs"
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+    labels:
+      org.label-schema.group: "monitoring"
+      traefik.enable: true
+      # middleware redirect
+      traefik.http.middlewares.redirect-to-https.redirectscheme.scheme: https
+      traefik.http.middlewares.redirect-to-https.redirectscheme.permanent: true
+
+      # redirection HTTP to HTTPS
+      traefik.http.routers.http_catchall.rule: hostregexp(`{host:.+}`)
+      traefik.http.routers.http_catchall.entrypoints: web
+      traefik.http.routers.http_catchall.middlewares: redirect-to-https
+
+      # dashboard
+      traefik.http.routers.traefik.rule: Host(`${DASHBOARD_HOST}`)
+      traefik.http.routers.traefik.entrypoints: websecure
+      traefik.http.routers.traefik.service: api@internal
+      traefik.http.routers.traefik.tls: true
+      traefik.http.routers.traefik.tls.certresolver: le
+      traefik.http.routers.traefik.tls.domains[0].main: "${HOST}"
+      traefik.http.routers.traefik.tls.domains[0].sans: "*.${HOST}"
+
+      traefik.http.routers.traefik.middlewares: dashboard
+      traefik.http.middlewares.dashboard.basicauth.users: ${DASHBOARD_USER}:${DASHBOARD_PASSWORD} # from .env
+
+  whoami:
+    image: containous/whoami
+    container_name: whoami-1
+    restart: unless-stopped
+    command:
+      - --port=8082 # Our service listens on 8082
+    networks:
+      # Has to be in the same network as Traefik for it to work
+      - local
+    labels:
+      org.label-schema.group: "monitoring"
+      # another way of adding lebels
+      traefik.enable: true
+      traefik.http.routers.whoami.rule: Host(`${WHOAMI_HOST}`)
+      traefik.http.routers.whoami.service: whoami
+      traefik.http.services.whoami.loadbalancer.server.port: 8082
+      traefik.http.routers.whoami.entrypoints: websecure
+      traefik.http.routers.whoami.tls.certresolver: le
+
+  portainer:
+   image: portainer/portainer-ce:2.14.0
+   container_name: portainer
+   command: -H unix:///var/run/docker.sock
+   restart: unless-stopped
+   volumes:
+     - /var/run/docker.sock:/var/run/docker.sock
+     - portainer_data:/data
+   labels:
+     org.label-schema.group: "monitoring"
+     #Frontend
+     traefik.enable: true
+     traefik.http.routers.portainer.rule: Host(`${PORTAINER_URL}`)
+     traefik.http.routers.portainer.service: portainer
+     traefik.http.services.portainer.loadbalancer.server.port: 9000
+     traefik.http.routers.portainer.entrypoints: websecure
+     traefik.http.routers.portainer.tls.certresolver: le
+#     traefik.http.routers.portainer.middlewares: portainer-ipwhitelist
+#     traefik.http.middlewares.portainer-ipwhitelist.ipwhitelist.sourcerange: ${PORTAINER_WHITEKUST_NETWORK}/${PORTAINER_WHITEKUST_NETWORK_MASK}
+     #Edge
+     traefik.http.routers.edge.rule: Host(`${PORTAINER_EDGE_URL}`)
+     traefik.http.routers.edge.service: edge
+     traefik.http.services.edge.loadbalancer.server.port: 8000
+     traefik.http.routers.edge.entrypoints: websecure
+   networks:
+     - local
+
+  prometheus:
+    image: prom/prometheus:v2.36.2
+    container_name: prometheus
+    volumes:
+      - ./prometheus:/etc/prometheus
+      - prometheus_data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.console.libraries=/etc/prometheus/console_libraries
+      - --web.console.templates=/etc/prometheus/consoles
+      - --storage.tsdb.retention.time=200h
+      - --web.enable-lifecycle
+    restart: unless-stopped
+    networks:
+      - local
+    labels:
+      org.label-schema.group: "monitoring"
+      # another way of adding lebels
+      traefik.enable: true
+      traefik.http.routers.prometheus.rule: Host(`${PROMETHEUS_HOST}`)
+      traefik.http.routers.prometheus.service: prometheus
+      traefik.http.services.prometheus.loadbalancer.server.port: 9090
+      traefik.http.routers.prometheus.entrypoints: websecure
+      traefik.http.routers.prometheus.tls.certresolver: le
+
+  nodeexporter:
+    image: prom/node-exporter:v1.3.1
+    container_name: nodeexporter
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.rootfs=/rootfs'
+      - '--path.sysfs=/host/sys'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+    restart: unless-stopped
+    expose:
+      - 9100    
+    networks:
+      - local
+    labels:
+      org.label-schema.group: "monitoring"
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.44.0
+    container_name: cadvisor
+    privileged: true
+    devices:
+      - /dev/kmsg:/dev/kmsg
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker:/var/lib/docker:ro
+      #- /cgroup:/cgroup:ro #doesn't work on MacOS only for Linux
+    restart: unless-stopped
+    expose:
+      - 8080
+    networks:
+      - local
+    labels:
+      org.label-schema.group: "monitoring"
+
+  grafana:
+    image: grafana/grafana:9.0.2
+    container_name: grafana
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards
+      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources
+    environment:
+      - GF_SECURITY_ADMIN_USER=${ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    restart: unless-stopped
+    networks:
+      - local
+    labels:
+      traefik.enable: true
+      traefik.http.routers.grafana.rule: Host(`${GRAFANA_HOST}`)
+      traefik.http.routers.grafana.service: grafana
+      traefik.http.services.grafana.loadbalancer.server.port: 3000
+      traefik.http.routers.grafana.entrypoints: websecure
+      traefik.http.routers.grafana.tls.certresolver: le
+      org.label-schema.group: "monitoring"
+
+  pushgateway:
+    image: prom/pushgateway:v1.4.3
+    container_name: pushgateway
+    restart: unless-stopped
+    expose:
+      - 9091
+    networks:
+      - local
+    labels:
+      org.label-schema.group: "monitoring"
